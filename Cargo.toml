@@ -1,6 +1,16 @@
 [package]
-name = "hyper-gzip"
-version = "0.1.0"
+name = "hyper-compress"
+version = "0.0.1"
 authors = ["Eliza Weisman <eliza@buoyant.io>"]
 
 [dependencies]
+bytes = "0.4.4"
+http = "^0.1"
+hyper = { git = "https://github.com/hyperium/hyper.git"}
+futures = "0.1.17"
+flate2 = { version = "1.0", features = ["tokio"] }
+tokio-io = "^0.1"
+
+[dev-dependencies]
+pretty_env_logger = "0.2.0"
+tokio = "0.1.3"
