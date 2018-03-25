@@ -2,8 +2,12 @@ extern crate bytes;
 extern crate http;
 extern crate hyper;
 extern crate flate2;
+#[macro_use]
 extern crate futures;
 extern crate tokio_io;
+
+#[macro_use]
+extern crate log;
 
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -25,7 +29,13 @@ pub enum CompressedBody<T: AsyncRead + AsyncWrite> {
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct ChunkedCodec;
+pub struct ChunkedCodec { size: usize }
+
+impl ChunkedCodec {
+    pub fn new(size: usize) -> Self {
+        ChunkedCodec { size, }
+    }
+}
 
 impl codec::Decoder for ChunkedCodec {
     type Item = hyper::Chunk;
@@ -33,13 +43,15 @@ impl codec::Decoder for ChunkedCodec {
 
     fn decode(&mut self, buf: &mut BytesMut)
               -> Result<Option<hyper::Chunk>, io::Error> {
-        if buf.len() > 0 {
-            let len = buf.len();
-            let buf = buf.split_to(len).freeze();
-            Ok(Some(hyper::Chunk::from(buf)))
-        } else {
-            Ok(None)
-        }
+        let len = buf.len();
+        debug!("buf.len={:?};", len);
+        let chunksz = match len  {
+            0 => return Ok(None),
+            len => usize::min(self.size, len)
+        };
+        let buf = buf.split_to(chunksz).freeze();
+        debug!("wrote {:?} byte chunk; len={:?}", chunksz, buf.len());
+        Ok(Some(hyper::Chunk::from(buf)))
     }
 }
 
