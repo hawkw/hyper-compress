@@ -13,6 +13,7 @@ use tokio_io::{AsyncRead, AsyncWrite};
 
 use std::io::{Read, Write, Cursor, BufWriter};
 use std::{mem, thread,fmt};
+use std::iter::FromIterator;
 
 pub struct Gzip<T> {
     inner: T,
@@ -68,35 +69,27 @@ const CHUNK_SIZE: usize = 2048;
 //         .with_body(body)
 // }
 
-struct ChunkingStream<B: Read> {
+struct ChunkingStream<B: AsyncRead> {
     read: B,
     chunksz: usize,
-    buf: Cursor<Vec<u8>>,
 }
 
-impl<B: Read + fmt::Debug> Stream for ChunkingStream<B> {
-    type Item = hyper::Chunk;
+impl<B: AsyncRead> Stream for ChunkingStream<B> {
+    type Item = Bytes;
     type Error = hyper::Error;
 
      fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        let mut this_chunksz= 0;
-        while this_chunksz < self.chunksz {
+        let mut buf = [0u8; CHUNK_SIZE];
+        let read = try_ready!(self.read
+            .poll_read(&mut buf[..])
+            .map_err(hyper::Error::Io));
+        debug!("read {:?} bytes", read);
 
-            debug!("read: {:?}", self.read);
-            let mut buf = [0u8; CHUNK_SIZE];
-            let read = self.read
-                .read(&mut buf[..])
-                .map_err(hyper::Error::Io)?;
-            self.buf.write(&buf)
-                .map_err(hyper::Error::Io)?;
-            debug!("buffered {:?} bytes", read);
-            if read == 0 { break; }
-            this_chunksz += read;
-        }
-        if this_chunksz > 0 {
-            let buf = mem::replace(&mut self.buf, Cursor::new(Vec::new())).into_inner();
-            debug!("wrote {:?} byte chunk; len={:?}", this_chunksz, buf.len());
-            Ok(Async::Ready(Some(hyper::Chunk::from(buf))))
+        if read > 0 {
+            debug!("wrote {:?} byte chunk; len={:?}", read, buf.len());
+            // i hate this
+            let chunk = Bytes::from(&buf[..read]);
+            Ok(Async::Ready(Some(chunk)))
         } else {
             debug!("reader emptied");
             Ok(Async::Ready(None))
@@ -158,7 +151,7 @@ where
                 let stream = ChunkingStream {
                     read,
                     chunksz,
-                    buf: Cursor::new(Vec::new()),
+                    // buf: Cursor::new(Vec::new()),
                 };
                 Body::wrap_stream(stream)
             } else {

@@ -62,11 +62,13 @@ impl codec::Encoder for ChunkedCodec {
     fn encode(&mut self, data: hyper::Chunk, buf: &mut BytesMut)
              -> Result<(), io::Error>
     {
+        
         buf.reserve(data.len());
         buf.put(data.as_ref());
         Ok(())
     }
 }
+
 
 // // ===== impl MaybeCompressed =====
 
