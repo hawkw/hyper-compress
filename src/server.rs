@@ -56,12 +56,17 @@ impl<T> GzipChunked<T> {
 }
 
 fn is_gzip<A>(req: &http::Request<A>) -> bool {
-    // let accept_encodings = req.headers()
-    //     .get::<header::AcceptEncoding>();
-    // if accept_encodings.is_none() {
-    //     return false;
-    // }
-    true
+    if let Some(accept_encodings) = req
+        .headers()
+        .get(header::ACCEPT_ENCODING)
+    {
+        // TODO: honor quality items & stuff.
+        return accept_encodings
+            .to_str()
+            .expect("accept-encoding header shouldn't be a weird wad of binary")
+            .contains("gzip");
+    }
+    false
 }
 
 impl<T, A, B> Service for GzipChunked<T>

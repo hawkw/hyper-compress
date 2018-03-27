@@ -13,7 +13,7 @@ use futures::future::{FutureResult, lazy};
 
 use hyper::{Body, Method, Request, Response, StatusCode};
 use hyper::server::{Http, Service};
-use hyper_compress::server::Gzip;
+use hyper_compress::server::GzipChunked;
 
 static INDEX: &'static [u8] =
     // b"Hello gzipped world!";
@@ -373,7 +373,7 @@ fn main() {
     let addr = "127.0.0.1:1337".parse().unwrap();
 
     tokio::run(lazy(move || {
-        let server = Http::new().bind(&addr, || Ok(Gzip::new(Echo))).unwrap();
+        let server = Http::new().bind(&addr, || Ok(GzipChunked::new(Echo))).unwrap();
         println!("Listening on http://{} with 1 thread.", server.local_addr().unwrap());
         server.run().map_err(|err| eprintln!("Server error {}", err))
     }));
