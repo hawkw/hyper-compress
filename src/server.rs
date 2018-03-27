@@ -12,27 +12,40 @@ use std::io::{Read, Write, Cursor, BufWriter};
 use std::{mem, thread,fmt};
 use std::iter::FromIterator;
 
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Builder {
+    chunk_size: Option<usize>,
+    compression: Option<Compression>,
+}
+
+#[derive(Debug, Clone)]
 pub struct GzipChunked<T> {
     inner: T,
     chunk_size: usize,
+    compression: Compression,
 }
 
-const CHUNK_SIZE: usize = 2048;
+const MAX_CHUNK_SIZE: usize = 2048;
 
 struct ChunkingStream<B: AsyncRead> {
     read: B,
     chunksz: usize,
 }
 
+// impl Builder
+
 impl<B: AsyncRead> Stream for ChunkingStream<B> {
     type Item = Bytes;
     type Error = hyper::Error;
 
      fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        let mut buf = [0u8; CHUNK_SIZE];
-        let read = try_ready!(self.read
-            .poll_read(&mut buf[..])
-            .map_err(hyper::Error::Io));
+        let mut buf = [0u8; MAX_CHUNK_SIZE];
+        let read = try_ready!(
+            self.read
+                .poll_read(&mut buf[..])
+                .map_err(hyper::Error::Io)
+        );
         trace!("read {:?} bytes", read);
 
         if read == 0 {
@@ -51,7 +64,11 @@ impl<B: AsyncRead> Stream for ChunkingStream<B> {
 
 impl<T> GzipChunked<T> {
     pub fn new(inner: T) -> Self {
-        Self { inner, chunk_size: CHUNK_SIZE, }
+        Self {
+            inner,
+            chunk_size: MAX_CHUNK_SIZE,
+            compression: Compression::default(),
+        }
     }
 }
 
@@ -90,12 +107,14 @@ where
     fn call(&self, req: http::Request<A>) -> Self::Future {
         let is_gzip = is_gzip(&req);
         let chunksz = self.chunk_size;
+        let compression = self.compression;
         Box::new(self.inner.call(req).map(move |rsp| {
             let (mut parts, body) = rsp.into_parts();
             let body: Body = if is_gzip {
                 let mut encoder = GzEncoder::new(
                     Cursor::new(Vec::<u8>::new()),
-                    Compression::default());
+                    compression,
+                );
                 parts.headers.insert(
                     header::CONTENT_ENCODING,
                     "gzip".parse().unwrap());
