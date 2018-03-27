@@ -22,53 +22,6 @@ pub struct Gzip<T> {
 
 const CHUNK_SIZE: usize = 2048;
 
-// struct EncodingStream<B: Buf> {
-//     in_buf: Reader<B>,
-//     encoder: Option<GzEncoder<Writer<BytesMut>>>
-// }
-
-// impl<B: Buf> Stream for EncodingStream<B> {
-//     type Item = Bytes;
-//     type Error = hyper::Error;
-
-//     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-//         let mut chunk = [0; CHUNK_SIZE];
-//         let readsz = self.in_buf.read(&mut chunk[..])?;
-//         print!("readsz={:?};", readsz);
-//         let mut encoder = self.encoder.take().expect("polled after finished");
-//         print!(" didnt return");
-//         let writesz = if readsz != 0 {
-//             encoder.write(&chunk[0..readsz])?
-//         } else {
-//             0
-//         };
-//         println!(" writesz={:?};", writesz);
-//         if writesz == 0 {
-//             self.encoder.take().unwrap().try_finish().expect("finish on write 0");
-//             return Ok(Async::Ready(None));
-//         };
-//         let buf = encoder.get_mut().get_mut().take().freeze();
-//         self.encoder = Some(encoder);
-//         Ok(Async::Ready(Some(buf)))
-//     }
-// }
-
-// fn map_response<B, F>(rsp: http::Response<B>, f: F)
-//     -> http::Response<MaybeCompressed<B>>
-// where
-//     F: Fn(B) -> MaybeCompressed<B>,
-//     B: Write,
-// {
-//     let status = rsp.status();
-//     let headers = rsp.headers().clone(); // TODO: remove clone.
-//     let body: B = *(rsp.body_ref().unwrap().clone());
-//     let body = f(body);
-//     http::Response::new()
-//         .with_status(status)
-//         .with_headers(headers)
-//         .with_body(body)
-// }
-
 struct ChunkingStream<B: AsyncRead> {
     read: B,
     chunksz: usize,
