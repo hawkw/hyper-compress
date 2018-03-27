@@ -4,18 +4,15 @@ use futures::{future, executor, Async, Poll, Future, Stream};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use hyper::{self, Body};
-// use hyper::header;
 use hyper::server::Service;
 use http::{self, header};
 use tokio_io::{AsyncRead, AsyncWrite};
-
-// use ::MaybeCompressed;
 
 use std::io::{Read, Write, Cursor, BufWriter};
 use std::{mem, thread,fmt};
 use std::iter::FromIterator;
 
-pub struct Gzip<T> {
+pub struct GzipChunked<T> {
     inner: T,
     chunk_size: usize,
 }
@@ -36,22 +33,23 @@ impl<B: AsyncRead> Stream for ChunkingStream<B> {
         let read = try_ready!(self.read
             .poll_read(&mut buf[..])
             .map_err(hyper::Error::Io));
-        debug!("read {:?} bytes", read);
+        trace!("read {:?} bytes", read);
 
-        if read > 0 {
-            debug!("wrote {:?} byte chunk; len={:?}", read, buf.len());
-            // i hate this
-            let chunk = Bytes::from(&buf[..read]);
-            Ok(Async::Ready(Some(chunk)))
-        } else {
-            debug!("reader emptied");
-            Ok(Async::Ready(None))
+        if read == 0 {
+            trace!("reader emptied");
+            return Ok(Async::Ready(None));
         }
+
+        debug!("wrote {:?} byte chunk; len={:?}", read, buf.len());
+        // i hate this
+        let chunk = Bytes::from(&buf[..read]);
+        Ok(Async::Ready(Some(chunk)))
+
 
      }
 }
 
-impl<T> Gzip<T> {
+impl<T> GzipChunked<T> {
     pub fn new(inner: T) -> Self {
         Self { inner, chunk_size: CHUNK_SIZE, }
     }
@@ -66,7 +64,7 @@ fn is_gzip<A>(req: &http::Request<A>) -> bool {
     true
 }
 
-impl<T, A, B> Service for Gzip<T>
+impl<T, A, B> Service for GzipChunked<T>
 where
     T: Service<
         Request = http::Request<A>,
@@ -104,7 +102,6 @@ where
                 let stream = ChunkingStream {
                     read,
                     chunksz,
-                    // buf: Cursor::new(Vec::new()),
                 };
                 Body::wrap_stream(stream)
             } else {
