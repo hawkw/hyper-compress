@@ -65,15 +65,15 @@ impl<B: AsyncRead> Stream for ChunkingStream<B> {
                 .poll_read(&mut buf[..])
                 .map_err(hyper::Error::Io)
         );
-        trace!("read {:?} bytes", read);
+        trace!("ChunkingStream: read {:?} bytes", read);
 
         if read == 0 {
-            trace!("reader emptied");
+            trace!("ChunkingStream: reader emptied");
             return Ok(Async::Ready(None));
         }
 
-        debug!("wrote {:?} byte chunk; len={:?}", read, buf.len());
         let chunk = Bytes::from(&buf[..read]);
+        trace!("ChunkingStream: wrote {:?} byte chunk", chunk.len());
         Ok(Async::Ready(Some(chunk)))
 
 
@@ -82,11 +82,7 @@ impl<B: AsyncRead> Stream for ChunkingStream<B> {
 
 impl<T> GzipChunked<T> {
     pub fn new(inner: T) -> Self {
-        Self {
-            inner,
-            chunk_size: MAX_CHUNK_SIZE,
-            compression: Compression::default(),
-        }
+        Builder::default().to_service(inner)
     }
 }
 
@@ -124,27 +120,36 @@ where
 
     fn call(&self, req: http::Request<A>) -> Self::Future {
         let is_gzip = is_gzip(&req);
+        trace!("GzipChunked: is_gzip={:?};", is_gzip);
         let chunksz = self.chunk_size;
         let compression = self.compression;
+
         Box::new(self.inner.call(req).map(move |rsp| {
             let (mut parts, body) = rsp.into_parts();
+
             let body: Body = if is_gzip {
                 let mut encoder = GzEncoder::new(
                     Cursor::new(Vec::<u8>::new()),
                     compression,
                 );
-                parts.headers.insert(
-                    header::CONTENT_ENCODING,
-                    "gzip".parse().unwrap());
+
                 let n = encoder.write(body.as_ref())
-                .expect("write to encoder");
-                info!("wrote {:?}",n);
-                let mut read = encoder.finish().expect("finish");
+                    .map_err(hyper::Error::Io)?;
+                let mut read = encoder.finish()
+                    .map_err(hyper::Error::Io)?;;
+                trace!("GzipChunked: encoded {:?} bytes", n);
+
                 read.set_position(0);
                 let stream = ChunkingStream {
                     read,
                     chunksz,
                 };
+
+                parts.headers.insert(
+                    header::CONTENT_ENCODING,
+                    "gzip".parse().unwrap()
+                );
+
                 Body::wrap_stream(stream)
             } else {
                 body.into()
@@ -152,7 +157,5 @@ where
             http::Response::from_parts(parts, body)
         }))
     }
-
-
 }
 
