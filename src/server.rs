@@ -1,53 +1,111 @@
-use futures::{future, executor, Async, Future, Stream};
+use bytes::Bytes;
+use futures::{Async, Poll, Future, Stream};
 use flate2::Compression;
-use flate2::read::GzEncoder;
+use flate2::write::GzEncoder;
 use hyper::{self, Body};
-// use hyper::header;
 use hyper::server::Service;
 use http::{self, header};
-use tokio_io::{AsyncRead, AsyncWrite};
+use tokio_io::AsyncRead;
 
-// use ::MaybeCompressed;
+use std::io::{Write, Cursor};
 
-use std::io::{Read, Write, Cursor};
-use std::thread;
-
-pub struct Gzip<T> {
-    inner: T,
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Builder {
+    chunk_size: Option<usize>,
+    compression: Option<Compression>,
 }
 
-// fn map_response<B, F>(rsp: http::Response<B>, f: F)
-//     -> http::Response<MaybeCompressed<B>>
-// where
-//     F: Fn(B) -> MaybeCompressed<B>,
-//     B: Write,
-// {
-//     let status = rsp.status();
-//     let headers = rsp.headers().clone(); // TODO: remove clone.
-//     let body: B = *(rsp.body_ref().unwrap().clone());
-//     let body = f(body);
-//     http::Response::new()
-//         .with_status(status)
-//         .with_headers(headers)
-//         .with_body(body)
-// }
+#[derive(Debug, Clone)]
+pub struct GzipChunked<T> {
+    inner: T,
+    chunk_size: usize,
+    compression: Compression,
+}
 
-impl<T> Gzip<T> {
-    pub fn new(inner: T) -> Self {
-        Self { inner, }
+const MAX_CHUNK_SIZE: usize = 2048;
+
+struct ChunkingStream<B: AsyncRead> {
+    read: B,
+    chunksz: usize,
+}
+
+// impl Builder
+impl Builder {
+    pub fn chunk_size(mut self, size: usize) -> Self {
+        self.chunk_size = Some(size);
+        self
+    }
+
+    pub fn compression_level(mut self, compression: Compression) -> Self {
+        self.compression = Some(compression);
+        self
+    }
+
+    pub fn to_service<T>(&self, inner: T) -> GzipChunked<T> {
+        GzipChunked {
+            inner,
+            chunk_size: self.chunk_size.unwrap_or(MAX_CHUNK_SIZE),
+            compression: self.compression.unwrap_or_default(),
+        }
     }
 }
 
-fn is_gzip<A>(req: &http::Request<A>) -> bool {
-    // let accept_encodings = req.headers()
-    //     .get::<header::AcceptEncoding>();
-    // if accept_encodings.is_none() {
-    //     return false;
-    // }
-    true
+impl<B: AsyncRead> Stream for ChunkingStream<B> {
+    type Item = Bytes;
+    type Error = hyper::Error;
+
+     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        let mut buf = vec![0u8; self.chunksz];
+        let read = try_ready!(
+            self.read
+                .poll_read(&mut buf)
+                .map_err(hyper::Error::Io)
+        );
+        trace!("ChunkingStream: read {:?} bytes", read);
+
+        if read == 0 {
+            trace!("ChunkingStream: reader emptied");
+            return Ok(Async::Ready(None));
+        }
+
+        let chunk = Bytes::from(&buf[..read]);
+        trace!("ChunkingStream: wrote {:?} byte chunk", chunk.len());
+        Ok(Async::Ready(Some(chunk)))
+
+
+     }
+}
+impl GzipChunked<()> {
+
+    pub fn builder() -> Builder {
+        Builder::default()
+    }
+
 }
 
-impl<T, A, B> Service for Gzip<T>
+impl<T> GzipChunked<T> {
+
+    pub fn new(inner: T) -> Self {
+        Builder::default().to_service(inner)
+    }
+
+}
+
+fn is_gzip<A>(req: &http::Request<A>) -> bool {
+    if let Some(accept_encodings) = req
+        .headers()
+        .get(header::ACCEPT_ENCODING)
+    {
+        // TODO: honor quality items & stuff.
+        return accept_encodings
+            .to_str()
+            .expect("accept-encoding header shouldn't be a weird wad of binary")
+            .contains("gzip");
+    }
+    false
+}
+
+impl<T, A, B> Service for GzipChunked<T>
 where
     T: Service<
         Request = http::Request<A>,
@@ -55,8 +113,7 @@ where
         Error = hyper::Error,
     >,
     T::Future: Send + 'static,
-    B: Into<Body> + AsRef<[u8]>,
-    // MaybeCompressed<B>: AsyncRead,
+    B: Into<Body> + AsRef<[u8]> + Send + 'static,
 {
     type Request = http::Request<A>;
     type Response = http::Response<Body>;
@@ -68,43 +125,43 @@ where
 
     fn call(&self, req: http::Request<A>) -> Self::Future {
         let is_gzip = is_gzip(&req);
-        Box::new(self.inner.call(req).map(move |rsp| {
+        trace!("GzipChunked: is_gzip={:?};", is_gzip);
+        let chunksz = self.chunk_size;
+        let compression = self.compression;
+
+        Box::new(self.inner.call(req).and_then(move |rsp| {
             let (mut parts, body) = rsp.into_parts();
+
             let body: Body = if is_gzip {
                 let mut encoder = GzEncoder::new(
-                    body.as_ref(),
-                    Compression::default());
-                parts.headers.insert(header::CONTENT_ENCODING, "gzip".parse().unwrap());
-                // let (mut tx_body, rx_body) = Body::channel();
-                // executor::spawn(future::lazy(move || {
-                //     let mut buf = [0u8; 4096];
-                //     loop {
-                //         match encoder.read(&mut buf) {
-                //             Ok(n) if n == 0 => { break; },
-                //             Ok(n) => {
-                //                 let chunk: hyper::Chunk = buf[0..n].to_vec().into();
-                //                 // while let Ok(Async::NotReady) = tx_body.poll_ready() { };
-                //                 tx_body.send_data(chunk)
-                //                     .expect("send data");
-                //             },
-                //             Err(e) => {
-                //                 eprintln!("error: {:?}", e);
-                //                 break;
-                //                 }
-                //         }
-                //     }
-                //     future::ok::<(),()>(())
-                // }));
-                let mut buf = Vec::new();
-                encoder.read_to_end(&mut buf);
-                buf.into()
+                    Cursor::new(Vec::<u8>::new()),
+                    compression,
+                );
+
+                let n = encoder.write(body.as_ref())
+                    .map_err(hyper::Error::Io)?;
+                let mut read = encoder.finish()
+                    .map_err(hyper::Error::Io)?;;
+                trace!("GzipChunked: encoded {:?} bytes", n);
+
+                read.set_position(0);
+                let stream = ChunkingStream {
+                    read,
+                    chunksz,
+                };
+
+                parts.headers.insert(
+                    header::CONTENT_ENCODING,
+                    "gzip".parse().unwrap()
+                );
+
+                Body::wrap_stream(stream)
             } else {
                 body.into()
             };
-            http::Response::from_parts(parts, body)
+            Ok(http::Response::from_parts(parts, body))
         }))
     }
 
 
 }
-
