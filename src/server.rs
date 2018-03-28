@@ -36,12 +36,15 @@ struct ChunkingStream<B: AsyncRead> {
 // impl Builder
 impl Builder {
     pub fn chunk_size(self, size: usize) -> Self {
+    pub fn chunk_size(mut self, size: usize) -> Self {
         self.chunk_size = Some(size);
         self
     }
 
     pub fn compression_level(self, compression: Compression) -> Self {
         self.chunk_size = Some(size);
+    pub fn compression_level(mut self, compression: Compression) -> Self {
+        self.compression = Some(compression);
         self
     }
 
@@ -50,6 +53,7 @@ impl Builder {
             inner,
             chunk_size: self.chunk_size.unwrap_or(MAX_CHUNK_SIZE),
             compression: self.compression.unwrap_or(Compression::Default)
+            compression: self.compression.unwrap_or_default(),
         }
     }
 }
@@ -125,6 +129,7 @@ where
         let compression = self.compression;
 
         Box::new(self.inner.call(req).map(move |rsp| {
+        Box::new(self.inner.call(req).and_then(move |rsp| {
             let (mut parts, body) = rsp.into_parts();
 
             let body: Body = if is_gzip {
@@ -155,7 +160,10 @@ where
                 body.into()
             };
             http::Response::from_parts(parts, body)
+            Ok(http::Response::from_parts(parts, body))
         }))
     }
 }
 
+
+}
