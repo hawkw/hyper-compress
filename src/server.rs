@@ -34,6 +34,25 @@ struct ChunkingStream<B: AsyncRead> {
 }
 
 // impl Builder
+impl Builder {
+    pub fn chunk_size(self, size: usize) -> Self {
+        self.chunk_size = Some(size);
+        self
+    }
+
+    pub fn compression_level(self, compression: Compression) -> Self {
+        self.chunk_size = Some(size);
+        self
+    }
+
+    pub fn to_service<T>(&self, inner: T) -> GzipChunked<T> {
+        GzipChunked {
+            inner,
+            chunk_size: self.chunk_size.unwrap_or(MAX_CHUNK_SIZE),
+            compression: self.compression.unwrap_or(Compression::Default)
+        }
+    }
+}
 
 impl<B: AsyncRead> Stream for ChunkingStream<B> {
     type Item = Bytes;
@@ -54,7 +73,6 @@ impl<B: AsyncRead> Stream for ChunkingStream<B> {
         }
 
         debug!("wrote {:?} byte chunk; len={:?}", read, buf.len());
-        // i hate this
         let chunk = Bytes::from(&buf[..read]);
         Ok(Async::Ready(Some(chunk)))
 
