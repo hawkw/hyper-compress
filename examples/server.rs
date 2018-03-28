@@ -373,7 +373,13 @@ fn main() {
     let addr = "127.0.0.1:1337".parse().unwrap();
 
     tokio::run(lazy(move || {
-        let server = Http::new().bind(&addr, || Ok(GzipChunked::new(Echo))).unwrap();
+        let server = Http::new().bind(&addr, || {
+            let svc: GzipChunked<Echo> =
+                GzipChunked::builder()
+                    .chunk_size(128)
+                    .to_service(Echo);
+            Ok(svc)
+        }).unwrap();
         println!("Listening on http://{} with 1 thread.", server.local_addr().unwrap());
         server.run().map_err(|err| eprintln!("Server error {}", err))
     }));

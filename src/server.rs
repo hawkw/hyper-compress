@@ -1,17 +1,13 @@
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use bytes::buf::{IntoBuf, Writer, Reader};
-use futures::{future, executor, Async, Poll, Future, Stream};
+use bytes::Bytes;
+use futures::{Async, Poll, Future, Stream};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use hyper::{self, Body};
 use hyper::server::Service;
 use http::{self, header};
-use tokio_io::{AsyncRead, AsyncWrite};
+use tokio_io::AsyncRead;
 
-use std::io::{Read, Write, Cursor, BufWriter};
-use std::{mem, thread,fmt};
-use std::iter::FromIterator;
-
+use std::io::{Write, Cursor};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Builder {
@@ -59,10 +55,10 @@ impl<B: AsyncRead> Stream for ChunkingStream<B> {
     type Error = hyper::Error;
 
      fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        let mut buf = [0u8; MAX_CHUNK_SIZE];
+        let mut buf = vec![0u8; self.chunksz];
         let read = try_ready!(
             self.read
-                .poll_read(&mut buf[..])
+                .poll_read(&mut buf)
                 .map_err(hyper::Error::Io)
         );
         trace!("ChunkingStream: read {:?} bytes", read);
@@ -79,11 +75,20 @@ impl<B: AsyncRead> Stream for ChunkingStream<B> {
 
      }
 }
+impl GzipChunked<()> {
+
+    pub fn builder() -> Builder {
+        Builder::default()
+    }
+
+}
 
 impl<T> GzipChunked<T> {
+
     pub fn new(inner: T) -> Self {
         Builder::default().to_service(inner)
     }
+
 }
 
 fn is_gzip<A>(req: &http::Request<A>) -> bool {
