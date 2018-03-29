@@ -10,3 +10,4 @@ extern crate tokio_io;
 extern crate log;
 
 pub mod server;
+pub mod stream;

@@ -1,13 +1,11 @@
-use bytes::Bytes;
-use futures::{Async, Poll, Future, Stream};
-use flate2::Compression;
-use flate2::write::GzEncoder;
-use hyper::{self, Body};
-use hyper::server::Service;
-use http::{self, header};
-use tokio_io::AsyncRead;
 
-use std::io::{Write, Cursor};
+use futures::Future;
+use flate2::Compression;
+use hyper::{self, Body, Request, Response};
+use hyper::header::{AcceptEncoding, TransferEncoding, ContentEncoding, Encoding, QualityItem};
+use hyper::server::Service;
+
+use ::stream;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Builder {
@@ -16,18 +14,13 @@ pub struct Builder {
 }
 
 #[derive(Debug, Clone)]
-pub struct GzipChunked<T> {
+pub struct ChunkedGzWriterService<T> {
     inner: T,
     chunk_size: usize,
     compression: Compression,
 }
 
-const MAX_CHUNK_SIZE: usize = 2048;
-
-struct ChunkingStream<B: AsyncRead> {
-    read: B,
-    chunksz: usize,
-}
+const DEFAULT_CHUNK_SIZE: usize = 1024;
 
 // impl Builder
 impl Builder {
@@ -41,41 +34,16 @@ impl Builder {
         self
     }
 
-    pub fn to_service<T>(&self, inner: T) -> GzipChunked<T> {
-        GzipChunked {
+    pub fn to_service<T>(&self, inner: T) -> ChunkedGzWriterService<T> {
+        ChunkedGzWriterService {
             inner,
-            chunk_size: self.chunk_size.unwrap_or(MAX_CHUNK_SIZE),
+            chunk_size: self.chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE),
             compression: self.compression.unwrap_or_default(),
         }
     }
 }
 
-impl<B: AsyncRead> Stream for ChunkingStream<B> {
-    type Item = Bytes;
-    type Error = hyper::Error;
-
-     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        let mut buf = vec![0u8; self.chunksz];
-        let read = try_ready!(
-            self.read
-                .poll_read(&mut buf)
-                .map_err(hyper::Error::Io)
-        );
-        trace!("ChunkingStream: read {:?} bytes", read);
-
-        if read == 0 {
-            trace!("ChunkingStream: reader emptied");
-            return Ok(Async::Ready(None));
-        }
-
-        let chunk = Bytes::from(&buf[..read]);
-        trace!("ChunkingStream: wrote {:?} byte chunk", chunk.len());
-        Ok(Async::Ready(Some(chunk)))
-
-
-     }
-}
-impl GzipChunked<()> {
+impl ChunkedGzWriterService<()> {
 
     pub fn builder() -> Builder {
         Builder::default()
@@ -83,7 +51,7 @@ impl GzipChunked<()> {
 
 }
 
-impl<T> GzipChunked<T> {
+impl<T> ChunkedGzWriterService<T> {
 
     pub fn new(inner: T) -> Self {
         Builder::default().to_service(inner)
@@ -91,77 +59,54 @@ impl<T> GzipChunked<T> {
 
 }
 
-fn is_gzip<A>(req: &http::Request<A>) -> bool {
+fn is_gzip<A>(req: &Request<A>) -> bool {
     if let Some(accept_encodings) = req
         .headers()
-        .get(header::ACCEPT_ENCODING)
+        .get::<AcceptEncoding>()
     {
         // TODO: honor quality items & stuff.
         return accept_encodings
-            .to_str()
-            .expect("accept-encoding header shouldn't be a weird wad of binary")
-            .contains("gzip");
+            .iter()
+            .any(|&QualityItem { ref item, .. }| item == &Encoding::Gzip)
     }
     false
 }
 
-impl<T, A, B> Service for GzipChunked<T>
+pub type GzWriterRequest<A> = (stream::MaybeGzWriter<stream::Chunks>, Request<A>);
+
+impl<T, A> Service for ChunkedGzWriterService<T>
 where
     T: Service<
-        Request = http::Request<A>,
-        Response = http::Response<B>,
+        Request = GzWriterRequest<A>,
+        Response = Response<Body>,
         Error = hyper::Error,
     >,
     T::Future: Send + 'static,
-    B: Into<Body> + AsRef<[u8]> + Send + 'static,
 {
-    type Request = http::Request<A>;
-    type Response = http::Response<Body>;
+    type Request = Request<A>;
+    type Response = Response<Body>;
     type Error = hyper::Error;
     type Future = Box<Future<
-        Item = http::Response<Body>,
+        Item = Response<Body>,
         Error = hyper::Error,
     > + Send + 'static>;
 
-    fn call(&self, req: http::Request<A>) -> Self::Future {
+    fn call(&self, req: Request<A>) -> Self::Future {
         let is_gzip = is_gzip(&req);
-        trace!("GzipChunked: is_gzip={:?};", is_gzip);
-        let chunksz = self.chunk_size;
-        let compression = self.compression;
-
-        Box::new(self.inner.call(req).and_then(move |rsp| {
-            let (mut parts, body) = rsp.into_parts();
-
-            let body: Body = if is_gzip {
-                let mut encoder = GzEncoder::new(
-                    Cursor::new(Vec::<u8>::new()),
-                    compression,
-                );
-
-                let n = encoder.write(body.as_ref())
-                    .map_err(hyper::Error::Io)?;
-                let mut read = encoder.finish()
-                    .map_err(hyper::Error::Io)?;;
-                trace!("GzipChunked: encoded {:?} bytes", n);
-
-                read.set_position(0);
-                let stream = ChunkingStream {
-                    read,
-                    chunksz,
-                };
-
-                parts.headers.insert(
-                    header::CONTENT_ENCODING,
-                    "gzip".parse().unwrap()
-                );
-
-                Body::wrap_stream(stream)
+        let compression = if is_gzip {
+            self.compression
+        } else {
+            Compression::none()
+        };
+        let (writer, body) = stream::Chunks::new(self.chunk_size);
+        let writer = stream::MaybeGzWriter::new(writer, compression);
+        Box::new(self.inner.call((writer, req)).map(move |resp| {
+            if is_gzip {
+                resp.with_header(ContentEncoding(vec![Encoding::Gzip]))
             } else {
-                body.into()
-            };
-            Ok(http::Response::from_parts(parts, body))
+                resp
+            }.with_body(body)
         }))
     }
-
 
 }
