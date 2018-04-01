@@ -9,41 +9,32 @@ use ::stream;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Builder {
-    chunk_size: Option<usize>,
     compression: Option<Compression>,
 }
 
 #[derive(Debug, Clone)]
-pub struct ChunkedGzWriterService<T> {
+pub struct GzWriterService<T> {
     inner: T,
-    chunk_size: usize,
     compression: Compression,
 }
 
-const DEFAULT_CHUNK_SIZE: usize = 1024;
-
 // impl Builder
 impl Builder {
-    pub fn chunk_size(mut self, size: usize) -> Self {
-        self.chunk_size = Some(size);
-        self
-    }
 
     pub fn compression_level(mut self, compression: Compression) -> Self {
         self.compression = Some(compression);
         self
     }
 
-    pub fn to_service<T>(&self, inner: T) -> ChunkedGzWriterService<T> {
-        ChunkedGzWriterService {
+    pub fn to_service<T>(&self, inner: T) -> GzWriterService<T> {
+        GzWriterService {
             inner,
-            chunk_size: self.chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE),
             compression: self.compression.unwrap_or_default(),
         }
     }
 }
 
-impl ChunkedGzWriterService<()> {
+impl GzWriterService<()> {
 
     pub fn builder() -> Builder {
         Builder::default()
@@ -51,7 +42,7 @@ impl ChunkedGzWriterService<()> {
 
 }
 
-impl<T> ChunkedGzWriterService<T> {
+impl<T> GzWriterService<T> {
 
     pub fn new(inner: T) -> Self {
         Builder::default().to_service(inner)
@@ -74,7 +65,7 @@ fn is_gzip<A>(req: &Request<A>) -> bool {
 
 pub type GzWriterRequest<A> = (stream::MaybeGzWriter<stream::WriteBody>, Request<A>);
 
-impl<T, A> Service for ChunkedGzWriterService<T>
+impl<T, A> Service for GzWriterService<T>
 where
     T: Service<
         Request = GzWriterRequest<A>,

@@ -15,7 +15,7 @@ use futures::future::{FutureResult, lazy};
 use hyper::{Body, Method, Request, Response, StatusCode};
 use hyper::server::{Http, Service};
 use hyper_compress::stream;
-use hyper_compress::server::{ChunkedGzWriterService, GzWriterRequest};
+use hyper_compress::server::{GzWriterService, GzWriterRequest};
 
 static INDEX: &'static [u8] = include_bytes!("test_file.txt");
 
@@ -60,8 +60,8 @@ fn main() {
     let echo_handle = core.handle();
     let serve_handle = core.handle();
     let serve = Http::new().serve_addr_handle(&addr, &serve_handle, move || {
-        let svc: ChunkedGzWriterService<Echo> =
-            ChunkedGzWriterService::builder()
+        let svc: GzWriterService<Echo> =
+            GzWriterService::builder()
                 .compression_level(flate2::Compression::fast())
                 // .chunk_size()
                 .to_service(Echo { handle: echo_handle.clone() });

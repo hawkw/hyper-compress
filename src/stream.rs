@@ -7,7 +7,7 @@ use futures::sync::mpsc;
 use hyper::{self, Body, Chunk};
 use tokio_io::{AsyncRead, AsyncWrite};
 
-use std::io::{self, Cursor, Read, Write};
+use std::io::{self, Read, Write};
 
 pub type MaybeGzWriter<W> = MaybeCompressed<W, GzEncoder<W>>;
 
