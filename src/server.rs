@@ -2,7 +2,7 @@
 use futures::Future;
 use flate2::Compression;
 use hyper::{self, Body, Request, Response};
-use hyper::header::{AcceptEncoding, TransferEncoding, ContentEncoding, Encoding, QualityItem};
+use hyper::header::{AcceptEncoding, ContentEncoding, Encoding, QualityItem};
 use hyper::server::Service;
 
 use ::stream;
@@ -72,7 +72,7 @@ fn is_gzip<A>(req: &Request<A>) -> bool {
     false
 }
 
-pub type GzWriterRequest<A> = (stream::MaybeGzWriter<stream::Chunks>, Request<A>);
+pub type GzWriterRequest<A> = (stream::MaybeGzWriter<stream::WriteBody>, Request<A>);
 
 impl<T, A> Service for ChunkedGzWriterService<T>
 where
@@ -98,7 +98,7 @@ where
         } else {
             Compression::none()
         };
-        let (writer, body) = stream::Chunks::new(self.chunk_size);
+        let (writer, body) = stream::WriteBody::new();
         let writer = stream::MaybeGzWriter::new(writer, compression);
         Box::new(self.inner.call((writer, req)).map(move |resp| {
             if is_gzip {

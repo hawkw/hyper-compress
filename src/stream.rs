@@ -7,7 +7,7 @@ use futures::sync::mpsc;
 use hyper::{self, Body, Chunk};
 use tokio_io::{AsyncRead, AsyncWrite};
 
-use std::io::{self, Read, Write};
+use std::io::{self, Cursor, Read, Write};
 
 pub type MaybeGzWriter<W> = MaybeCompressed<W, GzEncoder<W>>;
 
@@ -29,150 +29,73 @@ pub enum MaybeCompressed<A, B> {
 }
 
 #[derive(Clone, Debug)]
-pub struct Chunks {
-    size: usize,
+pub struct WriteBody {
     tx: mpsc::Sender<Result<Chunk, hyper::Error>>,
-    state: State,
-    buf: Option<Vec<u8>>,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum State {
-    Ready,
-    Sending(usize),
-    Closing
-}
 
-// ===== impl Chunks =====
+// ==== impl WriteBody =====
 
-impl Chunks {
-
-    pub fn new(size: usize) -> (Self, Body) {
+impl WriteBody {
+    pub fn new() -> (Self, Body) {
         let (tx, rx) = Body::pair();
-        let chunks = Chunks {
-            size,
-            buf: Some(vec![0u8; size]),
+        let writer = WriteBody {
             tx,
-            state: State::Ready,
         };
-        (chunks, rx)
+        (writer, rx)
     }
-
-    #[inline]
-    fn poll_to_result<T>(poll: Poll<(), mpsc::SendError<T>>) -> io::Result<()>
-    where
-        T: Send + Sync + 'static,
-    {
-        match poll {
-            Ok(Async::Ready(_)) => Ok(()),
-            // If the sender is not ready, return WouldBlock to
-            // signal that we're not ready.
-            Ok(Async::NotReady) => Err(io::Error::from(io::ErrorKind::WouldBlock)),
-            // SendError is returned if the body went away unexpectedly.
-            // This is bad news.
-            Err(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
-        }
-    }
-
-
 }
 
-impl Write for Chunks {
+impl Write for WriteBody {
 
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        loop {
-            match self.state {
-                State::Closing => {
-                    trace!("Chunks::write: resume closing");
-                    return Self::poll_to_result(self.tx.close())
-                        .map(|_| 0);
-                },
-                State::Sending(amount)  => {
-                    trace!("Chunks::write: sending {:?} bytes;", amount);
-                    let _ = Self::poll_to_result(self.tx.poll_complete())?;
-                    trace!("Chunks::write: sent");
-                    self.state = State::Ready;
-                    if self.buf.is_none() {
-                        // sending started by this `write` call.
-                        self.buf = Some(vec![0u8; self.size]);
-                        trace!("Chunks::write: finished this write;");
-                        return Ok(amount);
-                    } else {
-                        trace!("Chunks::write: ready for write;");
-                        continue;
-                    }
-                },
-                State::Ready => {
-                    // Before trying to write, ensure the sender is ready.
-                    let _ = Self::poll_to_result(self.tx.poll_ready())?;
-
-                    let mut chunk = self.buf.take()
-                        .expect("buf must be present in ready state");
-
-                    let amount = chunk.write(buf)?;
-                    trace!("Chunks::write: wrote {:?} bytes", amount);
-
-                    if amount == 0 {
-                        trace!("Chunks::write: start closing");
-                        self.state = State::Closing;
-                        continue;
-                    };
-
-                    let chunk = Chunk::from(chunk);
-                    match self.tx.start_send(Ok(chunk)) {
-                        Ok(AsyncSink::NotReady(_)) => {
-                            trace!("Chunks::write: start_send -> NotReady; reset");
-                            self.buf = Some(vec![0u8; self.size]);
-                            return Err(io::Error::from(io::ErrorKind::WouldBlock));
-                        },
-                        Err(e) => {
-                            trace!("Chunks::write: start_send -> Err");
-                            return Err(io::Error::new(io::ErrorKind::Other, e))
-                        },
-                        Ok(AsyncSink::Ready) => {
-                            trace!("Chunks::write: start sending");
-                            self.state = State::Sending(amount);
-                        },
-                    };
-                },
-            }
+        poll_to_result(self.tx.poll_ready())?;
+        match self.tx.start_send(Ok(Chunk::from(Vec::from(buf)))) {
+            Ok(AsyncSink::NotReady(_)) => {
+                trace!("WriteBody::write: start_send -> NotReady");
+                Err(io::Error::from(io::ErrorKind::WouldBlock))?
+            },
+            Err(e) => {
+                trace!("WriteBody::write: start_send -> Err");
+                Err(io::Error::new(io::ErrorKind::Other, e))?
+            },
+            Ok(AsyncSink::Ready) => {
+                trace!("Chunks::write: start sending {:?} bytes", buf.len());
+            },
         }
-
+        poll_to_result(self.tx.poll_complete())?;
+        Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        match self.state {
-            State::Sending(amount) => {
-                debug_assert!(self.buf.is_some());
-                trace!("Chunks::flush: resume sending {:?} bytes;", amount);
-                let _ = Self::poll_to_result(self.tx.poll_complete())?;
-                trace!("Chunks::flush: sent");
-                self.state = State::Ready;
-            },
-            State::Closing => {
-                trace!("Chunks::flush: resume closing");
-                Self::poll_to_result(self.tx.close())?;
-            }
-            State::Ready => {
-                // Do nothing.
-            }
-        }
-        Ok(())
+        poll_to_result(self.tx.poll_complete())
     }
 }
 
-impl AsyncWrite for Chunks {
-    fn shutdown(&mut self) -> Poll<(), io::Error> {
-        trace!("Chunks::shutdown; state={:?};", self.state);
-        if self.state != State::Closing {
 
-            trace!("Chunks::shutdown; flushing before shutdown;");
-            try_ready!(self.poll_flush());
-            self.state == State::Closing;
-        }
+impl AsyncWrite for WriteBody {
+    fn shutdown(&mut self) -> Poll<(), io::Error> {
+        trace!("WriteBody::shutdown;");
         self.poll_flush()
     }
 }
+
+#[inline]
+fn poll_to_result<T>(poll: Poll<(), mpsc::SendError<T>>) -> io::Result<()>
+where
+    T: Send + Sync + 'static,
+{
+    match poll {
+        Ok(Async::Ready(_)) => Ok(()),
+        // If the sender is not ready, return WouldBlock to
+        // signal that we're not ready.
+        Ok(Async::NotReady) => Err(io::Error::from(io::ErrorKind::WouldBlock)),
+        // SendError is returned if the body went away unexpectedly.
+        // This is bad news.
+        Err(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
+    }
+}
+
 
 // ===== impl MaybeCompressed =====
 
