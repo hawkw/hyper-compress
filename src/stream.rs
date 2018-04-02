@@ -132,6 +132,16 @@ where
 
 // ===== impl MaybeCompressed =====
 
+impl<A, B> MaybeCompressed<A, B> {
+    pub fn is_compressed(&self) -> bool {
+        if let &MaybeCompressed::Compressed(_) = self {
+            true
+        } else {
+            false
+        }
+    }
+}
+
 impl<A, B> Read for MaybeCompressed<A, B>
 where
     A: Read,
