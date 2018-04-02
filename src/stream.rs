@@ -22,6 +22,39 @@ impl<W: Write> MaybeGzWriter<W> {
 
 }
 
+impl<W: AsyncWrite> MaybeGzWriter<W> {
+    /// Finish encoding this stream, returning the underlying writer once the
+    /// encoding is done.
+    ///
+    /// Note that this function may not be suitable to call in a situation where
+    /// the underlying stream is an asynchronous I/O stream. To finish a stream
+    /// the `try_finish` (or `shutdown`) method should be used instead. To
+    /// re-acquire ownership of a stream it is safe to call this method after
+    /// `try_finish` or `shutdown` has returned `Ok`.
+    ///
+    /// # Errors
+    ///
+    /// This function will perform I/O to complete this stream, and any I/O
+    /// errors which occur will be returned from this function.
+    pub fn finish(self) -> io::Result<W> {
+        match self {
+            MaybeCompressed::Uncompressed(mut s) => {
+                s.flush()?;
+                Ok(s)
+            },
+            MaybeCompressed::Compressed(mut s) => {
+                while s.shutdown()? == Async::NotReady {
+                    trace!("MaybeGzWriter: still trying to shutdown io");
+                    // continue trying to shutdown
+                };
+                s.finish()
+            }
+        }
+
+    }
+
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum MaybeCompressed<A, B> {
     Uncompressed(A),
@@ -98,7 +131,6 @@ where
 
 
 // ===== impl MaybeCompressed =====
-
 
 impl<A, B> Read for MaybeCompressed<A, B>
 where

@@ -7,63 +7,87 @@ use hyper::server::Service;
 
 use ::stream;
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Builder {
-    compression: Option<Compression>,
-}
+/// A Hyper [`Body`] implementing [`io::Write`] which may or may not be
+/// GZIP-compressed.
+///
+/// [`Body`]: https://docs.rs/hyper/0.11.24/hyper/struct.Body.html
+/// [`io::Write`]: https://doc.rust-lang.org/std/io/trait.Write.html
+pub type GzBody = stream::MaybeGzWriter<stream::WriteBody>;
 
-#[derive(Debug, Clone)]
+pub type GzWriterRequest<A> = (GzBody, Request<A>);
+
+#[derive(Clone, Debug)]
 pub struct GzWriterService<T> {
     inner: T,
     compression: Compression,
 }
 
-// impl Builder
-impl Builder {
+// ===== impl GzBody =====
 
-    pub fn compression_level(mut self, compression: Compression) -> Self {
-        self.compression = Some(compression);
-        self
-    }
+impl GzBody {
 
-    pub fn to_service<T>(&self, inner: T) -> GzWriterService<T> {
-        GzWriterService {
-            inner,
-            compression: self.compression.unwrap_or_default(),
-        }
+    /// Construct a new `GzBody` for a [`Request`].
+    ///
+    /// # Arguments
+    /// - `request`: The [`Request`] to construct a response body for.
+    ///   The request's `Accept-Encoding` headers will be used to determine
+    ///   whether or not the returned body may be compressed.
+    /// - `level`: The [compression level] to use if the client will accept a
+    ///   compressed response. When in doubt, try [`Compression::default()`].
+    ///
+    /// # Returns
+    /// A writer paired with an associated `Body`. The `Body` should be set as
+    /// the response body for the request, while the writer is to be used to
+    /// write to the body asynchronously.
+    ///
+    /// [`Request`]: https://docs.rs/hyper/0.11.24/hyper/struct.Request.html
+    /// [compression level]: https://docs.rs/flate2/1.0.1/flate2/struct.Compression.html
+    /// [`Compression::default()`]: https://docs.rs/flate2/1.0.1/flate2/struct.Compression.html#impl-Default
+    pub fn for_request<B>(request: &Request<B>,
+                          level: Compression)
+                          -> (Self, Body)
+    {
+        let (writer, body) = stream::WriteBody::new();
+        let writer = if is_gzip(request) {
+            stream::MaybeGzWriter::new(writer, level)
+        } else {
+            stream::MaybeGzWriter::new(writer, Compression::none())
+        };
+        (writer, body)
     }
 }
 
-impl GzWriterService<()> {
-
-    pub fn builder() -> Builder {
-        Builder::default()
-    }
-
-}
-
+/// A middleware that wraps another [`Service`] and provides it with a
+/// writer for request bodies that may be GZIP compressed.
+///
+/// The wrapped service must take a request type consisting of
 impl<T> GzWriterService<T> {
 
     pub fn new(inner: T) -> Self {
-        Builder::default().to_service(inner)
+        GzWriterService {
+            inner,
+            compression: Compression::default(),
+        }
+    }
+
+    pub fn with_compression(mut self, level: Compression) -> Self {
+        self.compression = level;
+        self
     }
 
 }
 
-fn is_gzip<A>(req: &Request<A>) -> bool {
+fn is_gzip<B>(req: &Request<B>) -> bool {
     if let Some(accept_encodings) = req
         .headers()
         .get::<AcceptEncoding>()
     {
-        // TODO: honor quality items & stuff.
         return accept_encodings
             .iter()
             .any(|&QualityItem { ref item, .. }| item == &Encoding::Gzip)
     }
     false
 }
-
-pub type GzWriterRequest<A> = (stream::MaybeGzWriter<stream::WriteBody>, Request<A>);
 
 impl<T, A> Service for GzWriterService<T>
 where
