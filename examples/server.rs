@@ -27,7 +27,7 @@ impl Service for Index {
     type Error = hyper::Error;
     type Future = FutureResult<Self::Response, Self::Error>;
 
-    fn call(&self, (mutwriter, req): Self::Request) -> Self::Future {
+    fn call(&self, (writer, req): Self::Request) -> Self::Future {
         futures::future::ok(match (req.method(), req.uri().path()) {
             (&Method::Get, "/")  => {
                 let work = tokio_io::io::write_all(writer, INDEX)
