@@ -1,4 +1,4 @@
-#![deny(warnings)]
+// #![deny(warnings)]
 extern crate futures;
 extern crate hyper;
 extern crate hyper_compress;
@@ -10,42 +10,43 @@ extern crate log;
 extern crate flate2;
 
 use futures::{Future, Stream};
-use futures::future::FutureResult;
+use futures::future::{self, FutureResult};
 use hyper::{Body, Method, Response, StatusCode};
 use hyper::server::{Http, Service};
 use hyper_compress::server::{GzWriterService, GzWriterRequest};
+use std::io::Write;
 
-static INDEX: &'static [u8] = include_bytes!("test_file.txt");
-
-struct Index {
+struct DebugRequest {
     handle: tokio_core::reactor::Handle,
 }
 
-impl Service for Index {
+impl Service for DebugRequest {
     type Request = GzWriterRequest<Body>;
     type Response = Response<Body>;
     type Error = hyper::Error;
     type Future = FutureResult<Self::Response, Self::Error>;
 
     fn call(&self, (writer, req): Self::Request) -> Self::Future {
-        futures::future::ok(match (req.method(), req.uri().path()) {
+        match (req.method(), req.uri().path()) {
             (&Method::Get, "/")  => {
-                let work = tokio_io::io::write_all(writer, INDEX)
-                    .and_then(|(w, _)| {
-                        info!("shutting down io");
-                        tokio_io::io::shutdown(w)
+                let work = future::lazy(move || {
+                        let mut writer = writer;
+                        write!(&mut writer, "{:?}", req)?;
+                        Ok(writer)
                     })
+                    // .and_then(move || tokio_io::io::flush(writer, buf))
+                    .and_then(|w| tokio_io::io::shutdown(w) )
                     .map(|_| ())
                     .map_err(|e| {
                         error!("error writing gzipped body: {:?}", e);
                     });
                 self.handle.spawn(work);
-                Response::new()
+                future::ok(Response::new())
             },
-            _ => {
-                Response::new().with_status(StatusCode::NotFound)
-            }
-        })
+            _ =>
+                future::ok(Response::new().with_status(StatusCode::NotFound)
+            ),
+        }
     }
 
 }
@@ -58,7 +59,7 @@ fn main() {
     let index_handle = core.handle();
     let serve_handle = core.handle();
     let serve = Http::new().serve_addr_handle(&addr, &serve_handle, move || {
-        let svc = Index { handle: index_handle.clone() };
+        let svc = DebugRequest { handle: index_handle.clone() };
         let svc = GzWriterService::new(svc);
         Ok(svc)
     }).unwrap();

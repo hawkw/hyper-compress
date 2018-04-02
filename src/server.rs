@@ -1,110 +1,127 @@
-use futures::{future, executor, Async, Future, Stream};
+
+use futures::Future;
 use flate2::Compression;
-use flate2::read::GzEncoder;
-use hyper::{self, Body};
-// use hyper::header;
+use hyper::{self, Body, Request, Response};
+use hyper::header::{AcceptEncoding, ContentEncoding, Encoding, QualityItem};
 use hyper::server::Service;
-use http::{self, header};
-use tokio_io::{AsyncRead, AsyncWrite};
 
-// use ::MaybeCompressed;
+use ::stream;
 
-use std::io::{Read, Write, Cursor};
-use std::thread;
+/// A Hyper [`Body`] implementing [`io::Write`] which may or may not be
+/// GZIP-compressed.
+///
+/// [`Body`]: https://docs.rs/hyper/0.11.24/hyper/struct.Body.html
+/// [`io::Write`]: https://doc.rust-lang.org/std/io/trait.Write.html
+pub type GzBody = stream::MaybeGzWriter<stream::WriteBody>;
 
-pub struct Gzip<T> {
+pub type GzWriterRequest<A> = (GzBody, Request<A>);
+
+#[derive(Clone, Debug)]
+pub struct GzWriterService<T> {
     inner: T,
+    compression: Compression,
 }
 
-// fn map_response<B, F>(rsp: http::Response<B>, f: F)
-//     -> http::Response<MaybeCompressed<B>>
-// where
-//     F: Fn(B) -> MaybeCompressed<B>,
-//     B: Write,
-// {
-//     let status = rsp.status();
-//     let headers = rsp.headers().clone(); // TODO: remove clone.
-//     let body: B = *(rsp.body_ref().unwrap().clone());
-//     let body = f(body);
-//     http::Response::new()
-//         .with_status(status)
-//         .with_headers(headers)
-//         .with_body(body)
-// }
+// ===== impl GzBody =====
 
-impl<T> Gzip<T> {
-    pub fn new(inner: T) -> Self {
-        Self { inner, }
+impl GzBody {
+
+    /// Construct a new `GzBody` for a [`Request`].
+    ///
+    /// # Arguments
+    /// - `request`: The [`Request`] to construct a response body for.
+    ///   The request's `Accept-Encoding` headers will be used to determine
+    ///   whether or not the returned body may be compressed.
+    /// - `level`: The [compression level] to use if the client will accept a
+    ///   compressed response. When in doubt, try [`Compression::default()`].
+    ///
+    /// # Returns
+    /// A writer paired with an associated `Body`. The `Body` should be set as
+    /// the response body for the request, while the writer is to be used to
+    /// write to the body asynchronously.
+    ///
+    /// [`Request`]: https://docs.rs/hyper/0.11.24/hyper/struct.Request.html
+    /// [compression level]: https://docs.rs/flate2/1.0.1/flate2/struct.Compression.html
+    /// [`Compression::default()`]: https://docs.rs/flate2/1.0.1/flate2/struct.Compression.html#impl-Default
+    pub fn for_request<B>(request: &Request<B>,
+                          level: Compression)
+                          -> (Self, Body)
+    {
+        let (writer, body) = stream::WriteBody::new();
+        let writer = if is_gzip(request) {
+            stream::MaybeGzWriter::new(writer, level)
+        } else {
+            stream::MaybeGzWriter::new(writer, Compression::none())
+        };
+        (writer, body)
     }
 }
 
-fn is_gzip<A>(req: &http::Request<A>) -> bool {
-    // let accept_encodings = req.headers()
-    //     .get::<header::AcceptEncoding>();
-    // if accept_encodings.is_none() {
-    //     return false;
-    // }
-    true
+/// A middleware that wraps another [`Service`] and provides it with a
+/// writer for request bodies that may be GZIP compressed.
+///
+/// The wrapped service must take a request type consisting of
+impl<T> GzWriterService<T> {
+
+    pub fn new(inner: T) -> Self {
+        GzWriterService {
+            inner,
+            compression: Compression::default(),
+        }
+    }
+
+    pub fn with_compression(mut self, level: Compression) -> Self {
+        self.compression = level;
+        self
+    }
+
 }
 
-impl<T, A, B> Service for Gzip<T>
+fn is_gzip<B>(req: &Request<B>) -> bool {
+    if let Some(accept_encodings) = req
+        .headers()
+        .get::<AcceptEncoding>()
+    {
+        return accept_encodings
+            .iter()
+            .any(|&QualityItem { ref item, .. }| item == &Encoding::Gzip)
+    }
+    false
+}
+
+impl<T, A> Service for GzWriterService<T>
 where
     T: Service<
-        Request = http::Request<A>,
-        Response = http::Response<B>,
+        Request = GzWriterRequest<A>,
+        Response = Response<Body>,
         Error = hyper::Error,
     >,
     T::Future: Send + 'static,
-    B: Into<Body> + AsRef<[u8]>,
-    // MaybeCompressed<B>: AsyncRead,
 {
-    type Request = http::Request<A>;
-    type Response = http::Response<Body>;
+    type Request = Request<A>;
+    type Response = Response<Body>;
     type Error = hyper::Error;
     type Future = Box<Future<
-        Item = http::Response<Body>,
+        Item = Response<Body>,
         Error = hyper::Error,
     > + Send + 'static>;
 
-    fn call(&self, req: http::Request<A>) -> Self::Future {
+    fn call(&self, req: Request<A>) -> Self::Future {
         let is_gzip = is_gzip(&req);
-        Box::new(self.inner.call(req).map(move |rsp| {
-            let (mut parts, body) = rsp.into_parts();
-            let body: Body = if is_gzip {
-                let mut encoder = GzEncoder::new(
-                    body.as_ref(),
-                    Compression::default());
-                parts.headers.insert(header::CONTENT_ENCODING, "gzip".parse().unwrap());
-                // let (mut tx_body, rx_body) = Body::channel();
-                // executor::spawn(future::lazy(move || {
-                //     let mut buf = [0u8; 4096];
-                //     loop {
-                //         match encoder.read(&mut buf) {
-                //             Ok(n) if n == 0 => { break; },
-                //             Ok(n) => {
-                //                 let chunk: hyper::Chunk = buf[0..n].to_vec().into();
-                //                 // while let Ok(Async::NotReady) = tx_body.poll_ready() { };
-                //                 tx_body.send_data(chunk)
-                //                     .expect("send data");
-                //             },
-                //             Err(e) => {
-                //                 eprintln!("error: {:?}", e);
-                //                 break;
-                //                 }
-                //         }
-                //     }
-                //     future::ok::<(),()>(())
-                // }));
-                let mut buf = Vec::new();
-                encoder.read_to_end(&mut buf);
-                buf.into()
+        let compression = if is_gzip {
+            self.compression
+        } else {
+            Compression::none()
+        };
+        let (writer, body) = stream::WriteBody::new();
+        let writer = stream::MaybeGzWriter::new(writer, compression);
+        Box::new(self.inner.call((writer, req)).map(move |resp| {
+            if is_gzip {
+                resp.with_header(ContentEncoding(vec![Encoding::Gzip]))
             } else {
-                body.into()
-            };
-            http::Response::from_parts(parts, body)
+                resp
+            }.with_body(body)
         }))
     }
 
-
 }
-
