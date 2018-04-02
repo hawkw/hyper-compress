@@ -34,7 +34,6 @@ impl Service for DebugRequest {
                         write!(&mut writer, "{:?}", req)?;
                         Ok(writer)
                     })
-                    // .and_then(move || tokio_io::io::flush(writer, buf))
                     .and_then(|w| tokio_io::io::shutdown(w) )
                     .map(|_| ())
                     .map_err(|e| {

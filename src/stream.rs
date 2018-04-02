@@ -76,7 +76,8 @@ impl Write for WriteBody {
 impl AsyncWrite for WriteBody {
     fn shutdown(&mut self) -> Poll<(), io::Error> {
         trace!("WriteBody::shutdown;");
-        self.poll_flush()
+        self.tx.poll_complete()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     }
 }
 

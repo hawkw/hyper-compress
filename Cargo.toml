@@ -5,7 +5,7 @@ authors = ["Eliza Weisman <eliza@buoyant.io>"]
 
 [dependencies]
 http = "^0.1"
-hyper = "^0.11.24"
+hyper = "^0.11"
 futures = "^0.1.17"
 flate2 = { version = "^1.0", features = ["tokio"] }
 tokio-io = "^0.1"
